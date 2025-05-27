@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use crate::EqZero;
 
 fn parse_big_decimal(decimal_str: &str) -> BigDecimal {
     BigDecimal::from_str(decimal_str)
@@ -36,7 +37,7 @@ impl From<OrderBookDto> for OrderBook {
     fn from(dto: OrderBookDto) -> Self {
         let asks = decode_asks(&dto.asks);
         let bids = decode_bids(&dto.bids);
-        OrderBook { asks, bids, nonce: 0 }
+        OrderBook { asks, bids, nonce: dto.nonce }
     }
 }
 
@@ -59,6 +60,35 @@ pub struct OrderBook {
     pub asks: BTreeMap<BigDecimal, BigDecimal>,
     pub bids: BTreeMap<Reverse<BigDecimal>, BigDecimal>,
     pub nonce: u64,
+}
+
+impl OrderBook {
+    fn apply<A: Ord + Clone + EqZero>(
+        maybe_price_levels: Option<&BTreeMap<A, BigDecimal>>,
+        price_level_tree: &mut BTreeMap<A, BigDecimal>,
+    ) {
+        if let Some(price_levels) = maybe_price_levels {
+            for (price, size) in price_levels {
+                if size.eq_zero() {
+                    price_level_tree.remove(price);
+                } else {
+                    price_level_tree.insert(price.clone(), size.clone());
+                }
+            }
+        }
+    }
+
+    pub fn apply_updates(&mut self, updates: BTreeMap<u64, BookUpdate>) {
+        for update in updates.values() {
+            if self.nonce >= update.nonce {
+                eprintln!("snapshot.nonce = {}, update.nonce={}", self.nonce, update.nonce);
+                panic!("update nonce is smaller or equal to the snapshot's update")
+            }
+            Self::apply(update.bids.as_ref(), &mut self.bids);
+            Self::apply(update.asks.as_ref(), &mut self.asks);
+            self.nonce = update.nonce;
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -1,7 +1,6 @@
 #![feature(let_chains)]
 
 mod config;
-mod prettytable_ext;
 mod bitvavo;
 
 use crate::bitvavo::{get_deltas, pull_snapshots_until, BookUpdate, OrderBook};
@@ -30,33 +29,6 @@ impl EqZero for BigDecimal {
     }
 }
 
-fn apply<A: Ord + Clone + EqZero>(
-    maybe_price_levels: Option<&BTreeMap<A, BigDecimal>>,
-    mut price_level_tree: BTreeMap<A, BigDecimal>,
-) -> BTreeMap<A, BigDecimal> {
-    if let Some(price_levels) = maybe_price_levels {
-        for (price, size) in price_levels {
-            if size.eq_zero() {
-                price_level_tree.remove(price);
-            } else {
-                price_level_tree.insert(price.clone(), size.clone());
-            }
-        }
-    }
-    price_level_tree
-}
-
-fn merge_snapshot_and_update(snapshot: OrderBook, update: &BookUpdate) -> OrderBook {
-    if snapshot.nonce >= update.nonce {
-        panic!("snapshot is older than the update");
-    }
-    OrderBook {
-        nonce: update.nonce,
-        asks: apply(update.asks.as_ref(), snapshot.asks),
-        bids: apply(update.bids.as_ref(), snapshot.bids),
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let config = Config::parse();
@@ -66,6 +38,12 @@ async fn main() {
         get_deltas(&config, Arc::clone(&should_run)),
         pull_snapshots_until(&config, should_run),
     );
+
+    assert!(all_updates.len() >= 2);
+    assert!(snapshots.len() >= 2);
+
+    println!("update nonces = {:#?}", all_updates.keys().collect::<Vec<_>>());
+    println!("snapshots nonces = {:#?}", snapshots.keys().collect::<Vec<_>>());
 
     let snapshot_nonces: Vec<u64> = snapshots.keys().cloned().collect();
     for snapshot_nonce in snapshot_nonces {
@@ -78,31 +56,22 @@ async fn main() {
     let last_update_nonce = *snapshots.keys().last().unwrap();
 
     let relevant_updates: BTreeMap<u64, BookUpdate> = all_updates
-        .range(first_update_nonce + 1..=last_update_nonce)
+        .range(first_update_nonce + 1..last_update_nonce)
         .map(|(nonce, update)| (*nonce, update.clone()))
         .collect();
+
+    println!("relevant update nonces = {:#?}", relevant_updates.keys().collect::<Vec<_>>());
+    println!("snapshots nonces = {:#?}", snapshots.keys().collect::<Vec<_>>());
 
     let first_nonce_updates = *relevant_updates.keys().next().unwrap();
     let last_nonce_updates = *relevant_updates.keys().last().unwrap();
     let first_nonce_snapshots = *snapshots.keys().next().unwrap();
     let last_nonce_snapshots = *snapshots.keys().last().unwrap();
 
-    println!(
-        "first_nonce_updates={}, \
-        last_nonce_updates={}, \
-        first_nonce_snapshots={}, \
-        last_nonce_snapshots={}, \
-        all_updates_nonces = {:?}, \
-        all_snapshots_nonces = {:?}",
-        first_nonce_updates,
-        last_nonce_updates,
-        first_nonce_snapshots,
-        last_nonce_snapshots,
-        relevant_updates.keys(),
-        snapshots.keys(),
-    );
+    assert_eq!(first_nonce_updates, first_nonce_snapshots + 1);
+    assert_eq!(last_nonce_updates, last_nonce_snapshots - 1);
 
-    let mut first_snapshot = snapshots
+    let mut base_snapshot = snapshots
         .first_key_value()
         .map(|(_, v)| (*v).clone())
         .unwrap();
@@ -111,11 +80,12 @@ async fn main() {
         .last_key_value()
         .map(|(_, v)| v.clone()).unwrap();
 
-    for (_, update) in relevant_updates.iter() {
-        first_snapshot = merge_snapshot_and_update(first_snapshot, update)
-    }
+    println!("base snapshot nonce = {}", base_snapshot.nonce);
+    println!("first update nonce = {}", relevant_updates.keys().next().unwrap());
 
-    print_table(&first_snapshot, &last_snapshot);
+    base_snapshot.apply_updates(relevant_updates);
+
+    print_table(&base_snapshot, &last_snapshot);
 }
 
 fn print_table(
