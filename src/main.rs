@@ -32,8 +32,8 @@ impl EqZero for BigDecimal {
 
 fn apply<A: Ord + Clone + EqZero>(
     maybe_price_levels: Option<&BTreeMap<A, BigDecimal>>,
-    price_level_tree: &mut BTreeMap<A, BigDecimal>,
-) {
+    mut price_level_tree: BTreeMap<A, BigDecimal>,
+) -> BTreeMap<A, BigDecimal> {
     if let Some(price_levels) = maybe_price_levels {
         for (price, size) in price_levels {
             if size.eq_zero() {
@@ -43,23 +43,17 @@ fn apply<A: Ord + Clone + EqZero>(
             }
         }
     }
+    price_level_tree
 }
 
 fn merge_snapshot_and_update(snapshot: OrderBook, update: &BookUpdate) -> OrderBook {
     if snapshot.nonce >= update.nonce {
         panic!("snapshot is older than the update");
     }
-
-    let mut asks_tree = snapshot.asks;
-    let mut bids_tree = snapshot.bids;
-
-    apply(update.asks.as_ref(), &mut asks_tree);
-    apply(update.bids.as_ref(), &mut bids_tree);
-
     OrderBook {
         nonce: update.nonce,
-        asks: asks_tree,
-        bids: bids_tree,
+        asks: apply(update.asks.as_ref(), snapshot.asks),
+        bids: apply(update.bids.as_ref(), snapshot.bids),
     }
 }
 
