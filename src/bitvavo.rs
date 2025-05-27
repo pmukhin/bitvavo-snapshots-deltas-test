@@ -177,3 +177,105 @@ pub async fn get_deltas(
 
     updates
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bigdecimal::BigDecimal;
+    use std::collections::{BTreeMap};
+    use std::cmp::Reverse;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_order_book_apply_updates() {
+        // given
+        let mut initial_asks = BTreeMap::new();
+        initial_asks.insert(BigDecimal::from_str("100.0").unwrap(), BigDecimal::from_str("1.0").unwrap());
+        initial_asks.insert(BigDecimal::from_str("101.0").unwrap(), BigDecimal::from_str("2.0").unwrap());
+
+        let mut initial_bids = BTreeMap::new();
+        initial_bids.insert(Reverse(BigDecimal::from_str("99.0").unwrap()), BigDecimal::from_str("1.5").unwrap());
+
+        let mut order_book = OrderBook {
+            asks: initial_asks,
+            bids: initial_bids,
+            nonce: 1,
+        };
+
+        let mut update_asks = BTreeMap::new();
+        update_asks.insert(BigDecimal::from_str("100.0").unwrap(), BigDecimal::from_str("1.2").unwrap()); // update
+        update_asks.insert(BigDecimal::from_str("101.0").unwrap(), BigDecimal::from_str("0.0").unwrap()); // remove
+        update_asks.insert(BigDecimal::from_str("102.0").unwrap(), BigDecimal::from_str("3.0").unwrap()); // add
+
+        let mut update_bids = BTreeMap::new();
+        update_bids.insert(Reverse(BigDecimal::from_str("98.0").unwrap()), BigDecimal::from_str("0.0").unwrap()); // ignore - not present
+        update_bids.insert(Reverse(BigDecimal::from_str("99.0").unwrap()), BigDecimal::from_str("0.0").unwrap()); // remove
+        update_bids.insert(Reverse(BigDecimal::from_str("97.0").unwrap()), BigDecimal::from_str("2.5").unwrap()); // add
+
+        let mut updates = BTreeMap::new();
+        updates.insert(2, BookUpdate {
+            asks: Some(update_asks),
+            bids: Some(update_bids),
+            nonce: 2,
+        });
+
+        // when
+        order_book.apply_updates(updates);
+
+        // then
+        assert_eq!(order_book.nonce, 2);
+
+        assert_eq!(order_book.asks.len(), 2);
+        assert_eq!(order_book.asks.get(&BigDecimal::from_str("100.0").unwrap()).unwrap(), &BigDecimal::from_str("1.2").unwrap());
+        assert_eq!(order_book.asks.get(&BigDecimal::from_str("102.0").unwrap()).unwrap(), &BigDecimal::from_str("3.0").unwrap());
+        assert!(!order_book.asks.contains_key(&BigDecimal::from_str("101.0").unwrap()));
+
+        assert_eq!(order_book.bids.len(), 1);
+        assert_eq!(order_book.bids.get(&Reverse(BigDecimal::from_str("97.0").unwrap())).unwrap(), &BigDecimal::from_str("2.5").unwrap());
+        assert!(!order_book.bids.contains_key(&Reverse(BigDecimal::from_str("99.0").unwrap())));
+    }
+
+    #[test]
+    fn test_parse_big_decimal_valid() {
+        let input = "123.45000";
+        let result = parse_big_decimal(input);
+        let expected = BigDecimal::from_str("123.45").unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected decimal: abc")]
+    fn test_parse_big_decimal_invalid() {
+        parse_big_decimal("abc"); // Should panic
+    }
+
+    #[test]
+    fn test_decode_asks() {
+        let input = vec![
+            ["100.000".to_string(), "1.0000".to_string()],
+            ["101.0".to_string(), "0.000000".to_string()],
+        ];
+        let result = decode_asks(&input);
+
+        let mut expected = BTreeMap::new();
+        expected.insert(BigDecimal::from_str("100").unwrap(), BigDecimal::from_str("1").unwrap());
+        expected.insert(BigDecimal::from_str("101").unwrap(), BigDecimal::from_str("0").unwrap());
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_decode_bids() {
+        let input = vec![
+            ["99.9900".to_string(), "5.500".to_string()],
+            ["98.0000".to_string(), "0.000".to_string()],
+        ];
+        let result = decode_bids(&input);
+
+        let mut expected = BTreeMap::new();
+        expected.insert(Reverse(BigDecimal::from_str("99.99").unwrap()), BigDecimal::from_str("5.5").unwrap());
+        expected.insert(Reverse(BigDecimal::from_str("98").unwrap()), BigDecimal::from_str("0").unwrap());
+
+        assert_eq!(result, expected);
+    }
+}
