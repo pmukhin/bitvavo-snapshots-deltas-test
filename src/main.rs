@@ -55,10 +55,13 @@ async fn main() {
         .map(|(nonce, update)| (*nonce, update.clone()))
         .collect();
 
-    let first_nonce_updates = *relevant_updates.keys().next().unwrap();
-    let last_nonce_updates = *relevant_updates.keys().last().unwrap();
-    let first_nonce_snapshots = *snapshots.keys().next().unwrap();
-    let last_nonce_snapshots = *snapshots.keys().last().unwrap();
+    let mut relevant_updates_keys = relevant_updates.keys();
+    let mut snapshot_keys = snapshots.keys();
+
+    let first_nonce_updates = *relevant_updates_keys.next().unwrap();
+    let last_nonce_updates = *relevant_updates_keys.last().unwrap();
+    let first_nonce_snapshots = *snapshot_keys.next().unwrap();
+    let last_nonce_snapshots = *snapshot_keys.last().unwrap();
 
     assert_eq!(first_nonce_updates, first_nonce_snapshots + 1);
     assert_eq!(last_nonce_updates, last_nonce_snapshots - 1);
@@ -87,7 +90,7 @@ fn print_table(
         "Price level index",
         "Price level",
         "Received snapshot bids",
-        "Snapshot bids with applied updated",
+        "Snapshot bids with applied updates",
     ]);
 
     let empty = String::from("<empty>");

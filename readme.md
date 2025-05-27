@@ -1,8 +1,10 @@
 # Bitvavo Snapshots & Deltas Test
 
-This project demonstrates how to retrieve, apply, and verify order book snapshots and incremental updates ("deltas") from the [Bitvavo](https://bitvavo.com) cryptocurrency exchange.
+This project demonstrates how to retrieve, apply, and verify order book snapshots and incremental updates ("deltas")
+from the [Bitvavo](https://bitvavo.com) cryptocurrency exchange.
 
-It connects to the Bitvavo WebSocket API, collects a snapshot from the REST API, listens for updates over WebSocket, and applies updates to validate the consistency of the order book data.
+It connects to the Bitvavo WebSocket API, collects a snapshot from the REST API, listens for updates over WebSocket, and
+applies updates to validate the consistency of the order book data.
 
 ## Features
 
@@ -58,22 +60,22 @@ cargo run --release -- \
 
 Arguments:
 
-| Flag              | Description                              | Example               |
-|-------------------|------------------------------------------|-----------------------|
-| `--market`        | Trading pair to subscribe to             | `AAVE-EUR`            |
-| `--api-url`       | Bitvavo REST API base URL                | `https://api.bitvavo.com` |
-| `--ws-url`        | Bitvavo WebSocket base URL               | `wss://ws.bitvavo.com` |
-| `--depth`         | Order book depth to fetch                | `5`                   |
-| `--num-snapshots` | Number of updates to apply before exit   | `10`                  |
+| Flag              | Description                            | Example                   |
+|-------------------|----------------------------------------|---------------------------|
+| `--market`        | Trading pair to subscribe to           | `AAVE-EUR`                |
+| `--api-url`       | Bitvavo REST API base URL              | `https://api.bitvavo.com` |
+| `--ws-url`        | Bitvavo WebSocket base URL             | `wss://ws.bitvavo.com`    |
+| `--depth`         | Order book depth to fetch              | `5`                       |
+| `--num-snapshots` | Number of updates to apply before exit | `10`                      |
 
 ### Example Output
 
 ```
-+---------------------+--------------------------+-------------------------------------------+
-| Price level index   | Price level | Received snapshot bids | Snapshot with applied updates |
-+---------------------+--------------------------+-------------------------------------------+
-| 0                   | 5.5         | 99.99                  | 99.99                         |
-| 1                   | 5.5         | 99.98                  | 99.98                         |
++---------------------+--------------------------+------------------------------------------------+
+| Price level index   | Price level | Received snapshot bids | Snapshot bids with applied updates |
++---------------------+--------------------------+------------------------------------------------+
+| 0                   | 5.5         | 99.99                  | 99.99                              |
+| 1                   | 5.5         | 99.98                  | 99.98                              |
 ...
 ```
 
