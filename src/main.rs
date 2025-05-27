@@ -2,87 +2,41 @@
 
 mod config;
 mod prettytable_ext;
+mod bitvavo;
 
+use crate::bitvavo::{get_deltas, pull_snapshots_until, BookUpdate, OrderBook};
 use crate::config::Config;
-use crate::prettytable_ext::format_price_level;
+use bigdecimal::{BigDecimal, Zero};
 use clap::Parser;
-use futures::{SinkExt, StreamExt};
 use prettytable::{row, Table};
-use reqwest::Error;
-use serde::Deserialize;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::Message;
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct OrderBook {
-    pub asks: Vec<[String; 2]>,
-    pub bids: Vec<[String; 2]>,
-    pub nonce: u64,
+trait EqZero {
+    fn eq_zero(&self) -> bool;
 }
 
-#[derive(Debug, Deserialize)]
-pub struct BookUpdate {
-    #[serde(rename = "nonce")]
-    pub nonce: u64,
-    #[serde(rename = "asks")]
-    pub asks: Option<Vec<[String; 2]>>,
-    #[serde(rename = "bids")]
-    pub bids: Option<Vec<[String; 2]>>,
-}
-
-trait OrderBookUpdates {
-    fn trim_zeroes(&mut self);
-}
-
-fn trim_price_levels(source: &[[String; 2]]) -> Vec<[String; 2]> {
-    source.iter().map(|[price, size]| {
-        let price = trim_number(price);
-        let size = if size == "0" { "0".to_string() } else { trim_number(size) };
-        [price, size]
-    }).collect()
-}
-
-fn trim_number(num: &str) -> String {
-    if let Some(_) = num.find('.') {
-        let trimmed = num.trim_end_matches('0');
-        if trimmed.ends_with('.') {
-            trimmed[..trimmed.len() - 1].to_string()
-        } else {
-            trimmed.to_string()
-        }
-    } else {
-        num.to_string()
+impl EqZero for Reverse<BigDecimal> {
+    fn eq_zero(&self) -> bool {
+        self.0.is_zero()
     }
 }
 
-impl OrderBookUpdates for OrderBook {
-    fn trim_zeroes(&mut self) {
-        self.asks = trim_price_levels(&self.asks);
-        self.bids = trim_price_levels(&self.bids);
-        self.bids.reverse();
+impl EqZero for BigDecimal {
+    fn eq_zero(&self) -> bool {
+        self.is_zero()
     }
 }
 
-pub async fn get_snapshot(config: &Config) -> Result<OrderBook, Error> {
-    let url = format!("{}/v2/{}/book?depth={}", config.api_url, config.market, config.depth);
-    let mut raw_book: OrderBook = reqwest::get(url).await?.json().await?;
-
-    raw_book.trim_zeroes();
-    Ok(raw_book)
-}
-
-fn apply(
-    maybe_price_levels: &Option<Vec<[String; 2]>>,
-    price_level_tree: &mut BTreeMap<String, String>,
+fn apply<A: Ord + Clone + EqZero>(
+    maybe_price_levels: Option<&BTreeMap<A, BigDecimal>>,
+    price_level_tree: &mut BTreeMap<A, BigDecimal>,
 ) {
-    if let Some(price_levels) = &maybe_price_levels {
-        for [price, size] in price_levels {
-            if size == "0" {
+    if let Some(price_levels) = maybe_price_levels {
+        for (price, size) in price_levels {
+            if size.eq_zero() {
                 price_level_tree.remove(price);
             } else {
                 price_level_tree.insert(price.clone(), size.clone());
@@ -96,126 +50,63 @@ fn merge_snapshot_and_update(snapshot: OrderBook, update: &BookUpdate) -> OrderB
         panic!("snapshot is older than the update");
     }
 
-    let mut asks_tree = BTreeMap::new();
-    let mut bids_tree = BTreeMap::new();
+    let mut asks_tree = snapshot.asks;
+    let mut bids_tree = snapshot.bids;
 
-    for [price, size] in &snapshot.asks {
-        asks_tree.insert(price.clone(), size.clone());
-    }
-    for [price, size] in &snapshot.bids {
-        bids_tree.insert(price.clone(), size.clone());
-    }
-
-    apply(&update.asks, &mut asks_tree);
-    apply(&update.bids, &mut bids_tree);
-
-    let asks = asks_tree.iter()
-        .map(|(p, s)| [p.clone(), s.clone()])
-        .collect::<Vec<_>>();
-
-    let mut bids = bids_tree.iter()
-        .map(|(p, s)| [p.clone(), s.clone()])
-        .collect::<Vec<_>>();
-    bids.reverse();
+    apply(update.asks.as_ref(), &mut asks_tree);
+    apply(update.bids.as_ref(), &mut bids_tree);
 
     OrderBook {
         nonce: update.nonce,
-        asks,
-        bids,
+        asks: asks_tree,
+        bids: bids_tree,
     }
-}
-
-fn decode_book_update(raw_update: BookUpdate) -> BookUpdate {
-    let mut asks = None;
-    let mut bids = None;
-
-    if let Some(u_asks) = raw_update.asks {
-        asks = Some(trim_price_levels(&u_asks));
-    }
-    if let Some(u_bids) = raw_update.bids {
-        bids = Some(trim_price_levels(&u_bids));
-    }
-    BookUpdate { asks, bids, nonce: raw_update.nonce }
 }
 
 #[tokio::main]
 async fn main() {
     let config = Config::parse();
-    let url = format!("{}/v2/", config.ws_url)
-        .into_client_request()
-        .expect("invalid URL");
-
-    let (ws_stream, _) = connect_async(url)
-        .await
-        .expect("failed to connect");
-
-    println!("connected to Bitvavo WebSocket @ {}", config.ws_url);
-
-    let (mut write, mut read) = ws_stream.split();
-
     let should_run = Arc::new(AtomicBool::new(true));
-    let snapshots_arc = Arc::new(RwLock::new(BTreeMap::new()));
 
-    let cp = Arc::clone(&should_run);
-    let snapshots_arc_cp = Arc::clone(&snapshots_arc);
-    let config_clone = config.clone();
+    let (all_updates, mut snapshots) = tokio::join!(
+        get_deltas(&config, Arc::clone(&should_run)),
+        pull_snapshots_until(&config, should_run),
+    );
 
-    tokio::spawn(async move {
-        while cp.fetch_and(true, Ordering::Relaxed) {
-            let snapshot = get_snapshot(&config_clone).await.unwrap();
-            snapshots_arc_cp.write().await.entry(snapshot.nonce).or_insert(snapshot);
-        }
-    });
-
-    // Subscribe to book updates
-    let sub_msg = serde_json::json!({
-        "action": "subscribe",
-        "channels": [{
-            "name": "book",
-            "markets": [config.market],
-        }]
-    });
-
-    write.send(Message::Text(sub_msg.to_string().into()))
-        .await
-        .expect("failed to send subscribe to the events");
-
-    let mut updates = BTreeMap::new();
-
-    println!("starting polling events...");
-
-    while let Some(Ok(msg)) = read.next().await {
-        if let Message::Text(text) = msg {
-            // Try to parse as a book update
-            if let Ok(raw_update) = serde_json::from_str::<BookUpdate>(&text) {
-                let update = decode_book_update(raw_update);
-                updates.insert(update.nonce, update);
-            }
-            if updates.len() == config.num_snapshots {
-                should_run.store(false, Ordering::Relaxed);
-                break;
-            }
+    let snapshot_nonces: Vec<u64> = snapshots.keys().cloned().collect();
+    for snapshot_nonce in snapshot_nonces {
+        if !all_updates.contains_key(&(snapshot_nonce + 1)) {
+            snapshots.remove(&snapshot_nonce);
         }
     }
 
-    let snapshots = snapshots_arc.read().await;
-    let keys = updates.keys().cloned().collect::<Vec<_>>();
+    let first_update_nonce = *snapshots.keys().next().unwrap();
+    let last_update_nonce = *snapshots.keys().last().unwrap();
 
-    // let's clean the updates older the earliest snapshot
-    for key in &keys {
-        if *key <= *snapshots.first_key_value().unwrap().0 {
-            updates.remove(&key);
-        } else {
-            break;
-        }
-    }
+    let relevant_updates: BTreeMap<u64, BookUpdate> = all_updates
+        .range(first_update_nonce + 1..=last_update_nonce)
+        .map(|(nonce, update)| (*nonce, update.clone()))
+        .collect();
 
-    // let's clean updates that are younger than the latest snapshot
-    for key in &keys {
-        if *key > *snapshots.last_key_value().unwrap().0 {
-            updates.remove(&key);
-        }
-    }
+    let first_nonce_updates = *relevant_updates.keys().next().unwrap();
+    let last_nonce_updates = *relevant_updates.keys().last().unwrap();
+    let first_nonce_snapshots = *snapshots.keys().next().unwrap();
+    let last_nonce_snapshots = *snapshots.keys().last().unwrap();
+
+    println!(
+        "first_nonce_updates={}, \
+        last_nonce_updates={}, \
+        first_nonce_snapshots={}, \
+        last_nonce_snapshots={}, \
+        all_updates_nonces = {:?}, \
+        all_snapshots_nonces = {:?}",
+        first_nonce_updates,
+        last_nonce_updates,
+        first_nonce_snapshots,
+        last_nonce_snapshots,
+        relevant_updates.keys(),
+        snapshots.keys(),
+    );
 
     let mut first_snapshot = snapshots
         .first_key_value()
@@ -226,25 +117,34 @@ async fn main() {
         .last_key_value()
         .map(|(_, v)| v.clone()).unwrap();
 
-    for (_, update) in updates.iter() {
+    for (_, update) in relevant_updates.iter() {
         first_snapshot = merge_snapshot_and_update(first_snapshot, update)
     }
 
-    let mut bids = Table::new();
+    print_table(&first_snapshot, &last_snapshot);
+}
 
-    assert_eq!(first_snapshot.nonce == last_snapshot.nonce, true);
+fn print_table(
+    first_snapshot: &OrderBook,
+    last_snapshot: &OrderBook,
+) {
+    let mut bids = Table::new();
 
     bids.add_row(row![
         "Price level index",
+        "Price level",
         "Received snapshot bids",
-        "Snapshot with applied updates bids",
+        "Snapshot bids with applied updated",
     ]);
 
-    for i in 0..first_snapshot.bids.len() {
+    let empty = String::from("<empty>");
+
+    for (i, r @ Reverse(price)) in first_snapshot.bids.keys().enumerate() {
         bids.add_row(row![
-            i.to_string(),
-            format_price_level(last_snapshot.bids.get(i)),
-            format_price_level(first_snapshot.bids.get(i))
+            i,
+            price.to_string(),
+            last_snapshot.bids.get(r).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
+            first_snapshot.bids.get(r).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
         ]);
     }
 
@@ -254,35 +154,19 @@ async fn main() {
 
     asks.add_row(row![
         "Price level index",
+        "Price level",
         "Received snapshot asks",
-        "Snapshot with applied updates asks",
+        "Snapshot asks with applied updates",
     ]);
 
-    for i in 0..first_snapshot.asks.len() {
+    for (i, price) in first_snapshot.asks.keys().enumerate() {
         asks.add_row(row![
-            i.to_string(),
-            format_price_level(last_snapshot.asks.get(i)),
-            format_price_level(first_snapshot.asks.get(i))
+            i,
+            price.to_string(),
+            last_snapshot.asks.get(price).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
+            first_snapshot.asks.get(price).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
         ]);
     }
 
     asks.printstd();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn test_snapshot() {}
-
-    #[test]
-    fn test_trim_zeroes_0() {
-        let src = vec![["1300".to_string(), "1.234000".to_string()]];
-        let dst = trim_price_levels(&src);
-
-        assert_eq!(
-            dst,
-            vec![["1300".to_string(), "1.234".to_string()]],
-        )
-    }
 }
