@@ -42,9 +42,6 @@ async fn main() {
     assert!(all_updates.len() >= 2);
     assert!(snapshots.len() >= 2);
 
-    println!("update nonces = {:#?}", all_updates.keys().collect::<Vec<_>>());
-    println!("snapshots nonces = {:#?}", snapshots.keys().collect::<Vec<_>>());
-
     let snapshot_nonces: Vec<u64> = snapshots.keys().cloned().collect();
     for snapshot_nonce in snapshot_nonces {
         if !all_updates.contains_key(&(snapshot_nonce + 1)) {
@@ -59,9 +56,6 @@ async fn main() {
         .range(first_update_nonce + 1..last_update_nonce)
         .map(|(nonce, update)| (*nonce, update.clone()))
         .collect();
-
-    println!("relevant update nonces = {:#?}", relevant_updates.keys().collect::<Vec<_>>());
-    println!("snapshots nonces = {:#?}", snapshots.keys().collect::<Vec<_>>());
 
     let first_nonce_updates = *relevant_updates.keys().next().unwrap();
     let last_nonce_updates = *relevant_updates.keys().last().unwrap();
@@ -79,9 +73,6 @@ async fn main() {
     let last_snapshot = snapshots
         .last_key_value()
         .map(|(_, v)| v.clone()).unwrap();
-
-    println!("base snapshot nonce = {}", base_snapshot.nonce);
-    println!("first update nonce = {}", relevant_updates.keys().next().unwrap());
 
     base_snapshot.apply_updates(relevant_updates);
 
