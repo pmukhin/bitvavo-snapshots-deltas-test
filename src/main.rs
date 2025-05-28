@@ -51,7 +51,7 @@ async fn main() {
     let last_update_nonce = *snapshots.keys().last().unwrap();
 
     let relevant_updates: BTreeMap<u64, BookUpdate> = all_updates
-        .range(first_update_nonce + 1..last_update_nonce)
+        .range(first_update_nonce + 1..=last_update_nonce)
         .map(|(nonce, update)| (*nonce, update.clone()))
         .collect();
 
@@ -64,7 +64,7 @@ async fn main() {
     let last_nonce_snapshots = *snapshot_keys.last().unwrap();
 
     assert_eq!(first_nonce_updates, first_nonce_snapshots + 1);
-    assert_eq!(last_nonce_updates, last_nonce_snapshots - 1);
+    assert_eq!(last_nonce_updates, last_nonce_snapshots);
 
     let mut base_snapshot = snapshots
         .first_key_value()
