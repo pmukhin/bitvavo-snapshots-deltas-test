@@ -3,29 +3,12 @@ mod bitvavo;
 
 use crate::bitvavo::{get_deltas, pull_snapshots_until, BookUpdate, OrderBook};
 use crate::config::Config;
-use bigdecimal::{BigDecimal, Zero};
 use clap::Parser;
 use prettytable::{row, Table};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-
-trait EqZero {
-    fn eq_zero(&self) -> bool;
-}
-
-impl EqZero for Reverse<BigDecimal> {
-    fn eq_zero(&self) -> bool {
-        self.0.is_zero()
-    }
-}
-
-impl EqZero for BigDecimal {
-    fn eq_zero(&self) -> bool {
-        self.is_zero()
-    }
-}
 
 #[tokio::main]
 async fn main() {

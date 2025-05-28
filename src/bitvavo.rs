@@ -1,5 +1,5 @@
 use crate::config::Config;
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, Zero};
 use futures::{SinkExt, StreamExt};
 use reqwest::Error;
 use serde::Deserialize;
@@ -11,7 +11,22 @@ use std::sync::Arc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use crate::EqZero;
+
+trait EqZero {
+    fn eq_zero(&self) -> bool;
+}
+
+impl EqZero for Reverse<BigDecimal> {
+    fn eq_zero(&self) -> bool {
+        self.0.is_zero()
+    }
+}
+
+impl EqZero for BigDecimal {
+    fn eq_zero(&self) -> bool {
+        self.is_zero()
+    }
+}
 
 fn parse_big_decimal(decimal_str: &str) -> BigDecimal {
     BigDecimal::from_str(decimal_str)
