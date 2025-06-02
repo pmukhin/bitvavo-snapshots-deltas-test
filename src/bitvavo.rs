@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tracing::info;
 
 trait EqZero {
     fn eq_zero(&self) -> bool;
@@ -137,11 +138,17 @@ pub async fn pull_snapshots_until(
     config: &Config,
     should_run: Arc<AtomicBool>,
 ) -> BTreeMap<u64, OrderBook> {
+    let _span = tracing::info_span!("pull_snapshots_until").entered();
     let mut snapshots = BTreeMap::new();
+
+    info!("fetching snapshots...");
+
     while should_run.fetch_and(true, Ordering::Relaxed) {
         let raw_snapshot = get_snapshot(config).await.unwrap();
         snapshots.entry(raw_snapshot.nonce).or_insert(raw_snapshot.into());
     }
+
+    info!("done fetching snapshots");
     snapshots
 }
 
@@ -149,6 +156,8 @@ pub async fn get_deltas(
     config: &Config,
     stop_signal: Arc<AtomicBool>,
 ) -> BTreeMap<u64, BookUpdate> {
+    let _span = tracing::info_span!("get_deltas").entered();
+
     let url = format!("{}/v2/", config.ws_url)
         .into_client_request()
         .expect("invalid URL");
@@ -157,7 +166,7 @@ pub async fn get_deltas(
         .await
         .expect("failed to connect");
 
-    println!("connected to Bitvavo WebSocket @ {}", config.ws_url);
+    info!("connected to Bitvavo WebSocket @ {}", config.ws_url);
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -175,7 +184,7 @@ pub async fn get_deltas(
 
     let mut updates: BTreeMap<u64, BookUpdate> = BTreeMap::new();
 
-    println!("starting polling events...");
+    info!("starting polling events...");
 
     while let Some(Ok(msg)) = read.next().await {
         if let Message::Text(text) = msg {
@@ -189,6 +198,8 @@ pub async fn get_deltas(
             }
         }
     }
+
+    info!("done fetching events");
 
     updates
 }

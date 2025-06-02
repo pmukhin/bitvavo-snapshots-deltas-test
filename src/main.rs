@@ -9,11 +9,17 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tracing::{info, span, Level};
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+    let _span = span!(Level::INFO, "main").entered();
+
     let config = Config::parse();
     let should_run = Arc::new(AtomicBool::new(true));
+
+    info!("requesting deltas & snapshots...");
 
     let (all_updates, mut snapshots) = tokio::join!(
         get_deltas(&config, Arc::clone(&should_run)),
