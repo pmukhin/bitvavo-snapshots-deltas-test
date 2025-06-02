@@ -97,8 +97,7 @@ impl OrderBook {
     pub fn apply_updates(&mut self, updates: BTreeMap<u64, BookUpdate>) {
         for update in updates.values() {
             if self.nonce >= update.nonce {
-                eprintln!("snapshot.nonce = {}, update.nonce={}", self.nonce, update.nonce);
-                panic!("update nonce is smaller or equal to the snapshot's update")
+                panic!("update nonce is smaller or equal to the snapshot's update: snapshot.nonce = {}, update.nonce={}", self.nonce, update.nonce)
             }
             Self::apply(update.bids.as_ref(), &mut self.bids);
             Self::apply(update.asks.as_ref(), &mut self.asks);
@@ -208,8 +207,8 @@ pub async fn get_deltas(
 mod tests {
     use super::*;
     use bigdecimal::BigDecimal;
-    use std::collections::{BTreeMap};
     use std::cmp::Reverse;
+    use std::collections::BTreeMap;
     use std::str::FromStr;
 
     #[test]
