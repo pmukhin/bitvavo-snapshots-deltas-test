@@ -17,3 +17,8 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 anyhow = "1.0.101"
 tokio-util = "0.7.18"
+
+[profile.release]
+debug = true
+lto = "thin"
+codegen-units = 1
