@@ -1,6 +1,6 @@
 use clap::Parser;
 
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Parser)]
 pub struct Config {
     #[arg(long, default_value = "BTC-EUR")]
     pub market: String,
