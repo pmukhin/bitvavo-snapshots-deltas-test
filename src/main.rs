@@ -32,9 +32,7 @@ async fn main() -> anyhow::Result<()> {
     assert!(all_updates.len() >= 2);
     assert!(snapshots.len() >= 2);
 
-    snapshots.retain(|nonce, _| {
-        all_updates.contains_key(&(nonce + 1))
-    });
+    snapshots.retain(|nonce, _| all_updates.contains_key(&(nonce + 1)));
 
     let first_update_nonce = *snapshots
         .keys()
@@ -45,9 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .last()
         .context("can't get last_update_nonce: snapshots are empty?")?;
 
-    all_updates.retain(|nonce, _| {
-        *nonce > first_update_nonce && *nonce <= last_update_nonce
-    });
+    all_updates.retain(|nonce, _| *nonce > first_update_nonce && *nonce <= last_update_nonce);
 
     let mut relevant_updates_keys = all_updates.keys();
     let mut snapshot_keys = snapshots.keys();

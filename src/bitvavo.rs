@@ -36,7 +36,9 @@ fn try_decode_asks(asks: &[[String; 2]]) -> anyhow::Result<BTreeMap<PriceLevel, 
         .collect()
 }
 
-fn try_decode_bids(bids: &[[String; 2]]) -> anyhow::Result<BTreeMap<Reverse<PriceLevel>, BigDecimal>> {
+fn try_decode_bids(
+    bids: &[[String; 2]],
+) -> anyhow::Result<BTreeMap<Reverse<PriceLevel>, BigDecimal>> {
     bids.iter()
         .map(|b| (PriceLevel::from_str(&b[0]), BigDecimal::from_str(&b[1])))
         .map(|(p, q)| Ok((Reverse(p?), q?)))
@@ -123,13 +125,10 @@ pub struct PriceLevel {
 impl PriceLevel {
     fn from_str(price_str: &str) -> anyhow::Result<Self> {
         let mut r: u64 = 0;
-        price_str
-            .bytes()
-            .take_while(|b| *b != b'.')
-            .for_each(|b| {
-                r *= 10;
-                r += (b as u64) - 48;
-            });
+        price_str.bytes().take_while(|b| *b != b'.').for_each(|b| {
+            r *= 10;
+            r += (b as u64) - 48;
+        });
         Ok(PriceLevel { price_bps: r })
     }
 }
@@ -327,14 +326,8 @@ mod tests {
         let result = try_decode_asks(&input)?;
 
         let mut expected = BTreeMap::new();
-        expected.insert(
-            PriceLevel::from_str("100")?,
-            BigDecimal::from_str("1")?,
-        );
-        expected.insert(
-            PriceLevel::from_str("101")?,
-            BigDecimal::from_str("0")?,
-        );
+        expected.insert(PriceLevel::from_str("100")?, BigDecimal::from_str("1")?);
+        expected.insert(PriceLevel::from_str("101")?, BigDecimal::from_str("0")?);
 
         assert_eq!(result, expected);
 
