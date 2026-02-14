@@ -152,21 +152,24 @@ impl EqZero for PriceLevel {
     }
 }
 
-#[derive(Clone, Debug)]
+// this is strictly not cloneable
+#[derive(Debug)]
 pub struct BookUpdate {
     pub asks: Option<BTreeMap<PriceLevel, BigDecimal>>,
     pub bids: Option<BTreeMap<Reverse<PriceLevel>, BigDecimal>>,
     pub nonce: u64,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+// this is strictly not cloneable
+#[derive(Debug, Deserialize)]
 pub struct OrderBookDto {
     pub asks: Vec<[String; 2]>,
     pub bids: Vec<[String; 2]>,
     pub nonce: u64,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+// this is strictly not cloneable
+#[derive(Debug, Deserialize)]
 pub struct BookUpdateDto {
     pub nonce: u64,
     pub asks: Option<Vec<[String; 2]>>,

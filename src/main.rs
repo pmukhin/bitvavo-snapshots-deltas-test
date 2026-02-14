@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         pull_snapshots(&config, cancellation_token),
     );
 
-    let all_updates = all_updates_r?;
+    let mut all_updates = all_updates_r?;
     let mut snapshots = snapshots_r?;
 
     assert!(all_updates.len() >= 2);
@@ -45,12 +45,11 @@ async fn main() -> anyhow::Result<()> {
         .last()
         .context("can't get last_update_nonce: snapshots are empty?")?;
 
-    let relevant_updates: BTreeMap<u64, BookUpdate> = all_updates
-        .range(first_update_nonce + 1..=last_update_nonce)
-        .map(|(nonce, update)| (*nonce, update.clone()))
-        .collect();
+    all_updates.retain(|nonce, _| {
+        *nonce > first_update_nonce && *nonce <= last_update_nonce
+    });
 
-    let mut relevant_updates_keys = relevant_updates.keys();
+    let mut relevant_updates_keys = all_updates.keys();
     let mut snapshot_keys = snapshots.keys();
 
     let first_nonce_updates = *relevant_updates_keys
@@ -79,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|(_, v)| v.clone())
         .context("can't derive last_snapshot")?;
 
-    base_snapshot.apply_updates(relevant_updates);
+    base_snapshot.apply_updates(all_updates);
 
     print_table(base_snapshot, last_snapshot);
 
