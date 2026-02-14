@@ -21,10 +21,13 @@ async fn main() -> anyhow::Result<()> {
 
     info!("requesting deltas & snapshots...");
 
-    let (all_updates, mut snapshots) = tokio::join!(
+    let (all_updates_r, snapshots_r) = tokio::join!(
         get_deltas(&config, cancellation_token.clone()),
         pull_snapshots(&config, cancellation_token),
     );
+
+    let all_updates = all_updates_r?;
+    let mut snapshots = snapshots_r?;
 
     assert!(all_updates.len() >= 2);
     assert!(snapshots.len() >= 2);
@@ -81,12 +84,12 @@ async fn main() -> anyhow::Result<()> {
 
     base_snapshot.apply_updates(relevant_updates);
 
-    print_table(&base_snapshot, &last_snapshot);
+    print_table(base_snapshot, last_snapshot);
 
     Ok(())
 }
 
-fn print_table(first_snapshot: &OrderBook, last_snapshot: &OrderBook) {
+fn print_table(first_snapshot: OrderBook, last_snapshot: OrderBook) {
     let mut bids = Table::new();
 
     bids.add_row(row![

@@ -5,6 +5,7 @@ use reqwest::Error;
 use serde::Deserialize;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::fmt::Display;
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -28,58 +29,58 @@ impl EqZero for BigDecimal {
     }
 }
 
-fn parse_big_decimal(decimal_str: &str) -> BigDecimal {
-    BigDecimal::from_str(decimal_str)
-        .unwrap_or_else(|_| panic!("unexpected decimal: {}", decimal_str))
-        .normalized()
-}
-
-fn decode_asks(asks: &[[String; 2]]) -> BTreeMap<BigDecimal, BigDecimal> {
+fn try_decode_asks(asks: &[[String; 2]]) -> anyhow::Result<BTreeMap<PriceLevel, BigDecimal>> {
     asks.iter()
-        .map(|b| (parse_big_decimal(&b[0]), parse_big_decimal(&b[1])))
+        .map(|b| (PriceLevel::from_str(&b[0]), BigDecimal::from_str(&b[1])))
+        .map(|(p, q)| Ok((p?, q?)))
         .collect()
 }
 
-fn decode_bids(bids: &[[String; 2]]) -> BTreeMap<Reverse<BigDecimal>, BigDecimal> {
+fn try_decode_bids(bids: &[[String; 2]]) -> anyhow::Result<BTreeMap<Reverse<PriceLevel>, BigDecimal>> {
     bids.iter()
-        .map(|b| (Reverse(parse_big_decimal(&b[0])), parse_big_decimal(&b[1])))
+        .map(|b| (PriceLevel::from_str(&b[0]), BigDecimal::from_str(&b[1])))
+        .map(|(p, q)| Ok((Reverse(p?), q?)))
         .collect()
 }
 
-impl From<OrderBookDto> for OrderBook {
-    fn from(dto: OrderBookDto) -> Self {
-        let asks = decode_asks(&dto.asks);
-        let bids = decode_bids(&dto.bids);
-        OrderBook {
+impl TryFrom<OrderBookDto> for OrderBook {
+    type Error = anyhow::Error;
+
+    fn try_from(dto: OrderBookDto) -> anyhow::Result<Self> {
+        let asks = try_decode_asks(&dto.asks)?;
+        let bids = try_decode_bids(&dto.bids)?;
+        Ok(OrderBook {
             asks,
             bids,
             nonce: dto.nonce,
-        }
+        })
     }
 }
 
-impl From<BookUpdateDto> for BookUpdate {
-    fn from(dto: BookUpdateDto) -> BookUpdate {
+impl TryFrom<BookUpdateDto> for BookUpdate {
+    type Error = anyhow::Error;
+
+    fn try_from(dto: BookUpdateDto) -> anyhow::Result<BookUpdate> {
         let mut asks = None;
         let mut bids = None;
         if let Some(_asks) = dto.asks {
-            asks = Some(decode_asks(&_asks));
+            asks = Some(try_decode_asks(&_asks)?);
         }
         if let Some(_bids) = dto.bids {
-            bids = Some(decode_bids(&_bids));
+            bids = Some(try_decode_bids(&_bids)?);
         }
-        BookUpdate {
+        Ok(BookUpdate {
             asks,
             bids,
             nonce: dto.nonce,
-        }
+        })
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct OrderBook {
-    pub asks: BTreeMap<BigDecimal, BigDecimal>,
-    pub bids: BTreeMap<Reverse<BigDecimal>, BigDecimal>,
+    pub asks: BTreeMap<PriceLevel, BigDecimal>,
+    pub bids: BTreeMap<Reverse<PriceLevel>, BigDecimal>,
     pub nonce: u64,
 }
 
@@ -114,10 +115,47 @@ impl OrderBook {
     }
 }
 
+#[derive(Clone, Debug, Copy, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct PriceLevel {
+    price_bps: u64,
+}
+
+impl PriceLevel {
+    fn from_str(price_str: &str) -> anyhow::Result<Self> {
+        let mut r: u64 = 0;
+        price_str
+            .bytes()
+            .take_while(|b| *b != b'.')
+            .for_each(|b| {
+                r *= 10;
+                r += (b as u64) - 48;
+            });
+        Ok(PriceLevel { price_bps: r })
+    }
+}
+
+impl Display for PriceLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.price_bps.to_string())
+    }
+}
+
+impl EqZero for Reverse<PriceLevel> {
+    fn eq_zero(&self) -> bool {
+        self.0.eq_zero()
+    }
+}
+
+impl EqZero for PriceLevel {
+    fn eq_zero(&self) -> bool {
+        self.price_bps.is_zero()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BookUpdate {
-    pub asks: Option<BTreeMap<BigDecimal, BigDecimal>>,
-    pub bids: Option<BTreeMap<Reverse<BigDecimal>, BigDecimal>>,
+    pub asks: Option<BTreeMap<PriceLevel, BigDecimal>>,
+    pub bids: Option<BTreeMap<Reverse<PriceLevel>, BigDecimal>>,
     pub nonce: u64,
 }
 
@@ -147,28 +185,197 @@ async fn get_snapshot(config: &Config) -> Result<OrderBookDto, Error> {
 pub async fn pull_snapshots(
     config: &Config,
     cancellation_token: CancellationToken,
-) -> BTreeMap<u64, OrderBook> {
+) -> anyhow::Result<BTreeMap<u64, OrderBook>> {
     let _span = tracing::info_span!("pull_snapshots_until").entered();
     let mut snapshots = BTreeMap::new();
 
     info!("fetching snapshots...");
 
     while !cancellation_token.is_cancelled() {
-        let raw_snapshot = get_snapshot(config).await.unwrap();
+        let raw_snapshot = get_snapshot(config).await?;
         snapshots
             .entry(raw_snapshot.nonce)
-            .or_insert(raw_snapshot.into());
+            .or_insert(raw_snapshot.try_into()?);
     }
 
     info!("done fetching snapshots");
-    snapshots
+    Ok(snapshots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bigdecimal::BigDecimal;
+    use std::cmp::Reverse;
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_order_book_apply_updates() {
+        // given
+        let mut initial_asks = BTreeMap::new();
+        initial_asks.insert(
+            PriceLevel::from_str("100.0").unwrap(),
+            BigDecimal::from_str("1.0").unwrap(),
+        );
+        initial_asks.insert(
+            PriceLevel::from_str("101.0").unwrap(),
+            BigDecimal::from_str("2.0").unwrap(),
+        );
+
+        let mut initial_bids = BTreeMap::new();
+        initial_bids.insert(
+            Reverse(PriceLevel::from_str("99.0").unwrap()),
+            BigDecimal::from_str("1.5").unwrap(),
+        );
+
+        let mut order_book = OrderBook {
+            asks: initial_asks,
+            bids: initial_bids,
+            nonce: 1,
+        };
+
+        let mut update_asks = BTreeMap::new();
+        update_asks.insert(
+            PriceLevel::from_str("100.0").unwrap(),
+            BigDecimal::from_str("1.2").unwrap(),
+        ); // update
+        update_asks.insert(
+            PriceLevel::from_str("101.0").unwrap(),
+            BigDecimal::from_str("0.0").unwrap(),
+        ); // remove
+        update_asks.insert(
+            PriceLevel::from_str("102.0").unwrap(),
+            BigDecimal::from_str("3.0").unwrap(),
+        ); // add
+
+        let mut update_bids = BTreeMap::new();
+        update_bids.insert(
+            Reverse(PriceLevel::from_str("98.0").unwrap()),
+            BigDecimal::from_str("0.0").unwrap(),
+        ); // ignore - not present
+        update_bids.insert(
+            Reverse(PriceLevel::from_str("99.0").unwrap()),
+            BigDecimal::from_str("0.0").unwrap(),
+        ); // remove
+        update_bids.insert(
+            Reverse(PriceLevel::from_str("97.0").unwrap()),
+            BigDecimal::from_str("2.5").unwrap(),
+        ); // add
+
+        let mut updates = BTreeMap::new();
+        updates.insert(
+            2,
+            BookUpdate {
+                asks: Some(update_asks),
+                bids: Some(update_bids),
+                nonce: 2,
+            },
+        );
+
+        // when
+        order_book.apply_updates(updates);
+
+        // then
+        assert_eq!(order_book.nonce, 2);
+
+        assert_eq!(order_book.asks.len(), 2);
+        assert_eq!(
+            order_book
+                .asks
+                .get(&PriceLevel::from_str("100.0").unwrap())
+                .unwrap(),
+            &BigDecimal::from_str("1.2").unwrap()
+        );
+        assert_eq!(
+            order_book
+                .asks
+                .get(&PriceLevel::from_str("102.0").unwrap())
+                .unwrap(),
+            &BigDecimal::from_str("3.0").unwrap()
+        );
+        assert!(
+            !order_book
+                .asks
+                .contains_key(&PriceLevel::from_str("101.0").unwrap())
+        );
+
+        assert_eq!(order_book.bids.len(), 1);
+        assert_eq!(
+            order_book
+                .bids
+                .get(&Reverse(PriceLevel::from_str("97.0").unwrap()))
+                .unwrap(),
+            &BigDecimal::from_str("2.5").unwrap()
+        );
+        assert!(
+            !order_book
+                .bids
+                .contains_key(&Reverse(PriceLevel::from_str("99.0").unwrap()))
+        );
+    }
+
+    #[test]
+    fn test_decode_asks() -> anyhow::Result<()> {
+        let input = vec![
+            ["100.000".to_string(), "1.0000".to_string()],
+            ["101.0".to_string(), "0.000000".to_string()],
+        ];
+        let result = try_decode_asks(&input)?;
+
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            PriceLevel::from_str("100")?,
+            BigDecimal::from_str("1")?,
+        );
+        expected.insert(
+            PriceLevel::from_str("101")?,
+            BigDecimal::from_str("0")?,
+        );
+
+        assert_eq!(result, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decode_bids() -> anyhow::Result<()> {
+        let input = vec![
+            ["99.9900".to_string(), "5.500".to_string()],
+            ["98.0000".to_string(), "0.000".to_string()],
+        ];
+        let result = try_decode_bids(&input)?;
+
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            Reverse(PriceLevel::from_str("99.99")?),
+            BigDecimal::from_str("5.5")?,
+        );
+        expected.insert(
+            Reverse(PriceLevel::from_str("98")?),
+            BigDecimal::from_str("0")?,
+        );
+
+        assert_eq!(result, expected);
+
+        Ok(())
+    }
+}
+
+pub struct TokenWrapper(CancellationToken);
+
+impl Drop for TokenWrapper {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 pub async fn get_deltas(
     config: &Config,
     cancellation_token: CancellationToken,
-) -> BTreeMap<u64, BookUpdate> {
+) -> anyhow::Result<BTreeMap<u64, BookUpdate>> {
     let _span = tracing::info_span!("get_deltas").entered();
+    let _token_wrapper = TokenWrapper(cancellation_token);
 
     let url = format!("{}/v2/", config.ws_url)
         .into_client_request()
@@ -201,10 +408,9 @@ pub async fn get_deltas(
         if let Message::Text(text) = msg {
             // Try to parse as a book update
             if let Ok(raw_update) = serde_json::from_str::<BookUpdateDto>(&text) {
-                updates.insert(raw_update.nonce, raw_update.into());
+                updates.insert(raw_update.nonce, raw_update.try_into()?);
             }
             if updates.len() == config.num_snapshots {
-                cancellation_token.cancel();
                 break;
             }
         }
@@ -212,175 +418,5 @@ pub async fn get_deltas(
 
     info!("done fetching events");
 
-    updates
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bigdecimal::BigDecimal;
-    use std::cmp::Reverse;
-    use std::collections::BTreeMap;
-    use std::str::FromStr;
-
-    #[test]
-    fn test_order_book_apply_updates() {
-        // given
-        let mut initial_asks = BTreeMap::new();
-        initial_asks.insert(
-            BigDecimal::from_str("100.0").unwrap(),
-            BigDecimal::from_str("1.0").unwrap(),
-        );
-        initial_asks.insert(
-            BigDecimal::from_str("101.0").unwrap(),
-            BigDecimal::from_str("2.0").unwrap(),
-        );
-
-        let mut initial_bids = BTreeMap::new();
-        initial_bids.insert(
-            Reverse(BigDecimal::from_str("99.0").unwrap()),
-            BigDecimal::from_str("1.5").unwrap(),
-        );
-
-        let mut order_book = OrderBook {
-            asks: initial_asks,
-            bids: initial_bids,
-            nonce: 1,
-        };
-
-        let mut update_asks = BTreeMap::new();
-        update_asks.insert(
-            BigDecimal::from_str("100.0").unwrap(),
-            BigDecimal::from_str("1.2").unwrap(),
-        ); // update
-        update_asks.insert(
-            BigDecimal::from_str("101.0").unwrap(),
-            BigDecimal::from_str("0.0").unwrap(),
-        ); // remove
-        update_asks.insert(
-            BigDecimal::from_str("102.0").unwrap(),
-            BigDecimal::from_str("3.0").unwrap(),
-        ); // add
-
-        let mut update_bids = BTreeMap::new();
-        update_bids.insert(
-            Reverse(BigDecimal::from_str("98.0").unwrap()),
-            BigDecimal::from_str("0.0").unwrap(),
-        ); // ignore - not present
-        update_bids.insert(
-            Reverse(BigDecimal::from_str("99.0").unwrap()),
-            BigDecimal::from_str("0.0").unwrap(),
-        ); // remove
-        update_bids.insert(
-            Reverse(BigDecimal::from_str("97.0").unwrap()),
-            BigDecimal::from_str("2.5").unwrap(),
-        ); // add
-
-        let mut updates = BTreeMap::new();
-        updates.insert(
-            2,
-            BookUpdate {
-                asks: Some(update_asks),
-                bids: Some(update_bids),
-                nonce: 2,
-            },
-        );
-
-        // when
-        order_book.apply_updates(updates);
-
-        // then
-        assert_eq!(order_book.nonce, 2);
-
-        assert_eq!(order_book.asks.len(), 2);
-        assert_eq!(
-            order_book
-                .asks
-                .get(&BigDecimal::from_str("100.0").unwrap())
-                .unwrap(),
-            &BigDecimal::from_str("1.2").unwrap()
-        );
-        assert_eq!(
-            order_book
-                .asks
-                .get(&BigDecimal::from_str("102.0").unwrap())
-                .unwrap(),
-            &BigDecimal::from_str("3.0").unwrap()
-        );
-        assert!(
-            !order_book
-                .asks
-                .contains_key(&BigDecimal::from_str("101.0").unwrap())
-        );
-
-        assert_eq!(order_book.bids.len(), 1);
-        assert_eq!(
-            order_book
-                .bids
-                .get(&Reverse(BigDecimal::from_str("97.0").unwrap()))
-                .unwrap(),
-            &BigDecimal::from_str("2.5").unwrap()
-        );
-        assert!(
-            !order_book
-                .bids
-                .contains_key(&Reverse(BigDecimal::from_str("99.0").unwrap()))
-        );
-    }
-
-    #[test]
-    fn test_parse_big_decimal_valid() {
-        let input = "123.45000";
-        let result = parse_big_decimal(input);
-        let expected = BigDecimal::from_str("123.45").unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    #[should_panic(expected = "unexpected decimal: abc")]
-    fn test_parse_big_decimal_invalid() {
-        parse_big_decimal("abc"); // Should panic
-    }
-
-    #[test]
-    fn test_decode_asks() {
-        let input = vec![
-            ["100.000".to_string(), "1.0000".to_string()],
-            ["101.0".to_string(), "0.000000".to_string()],
-        ];
-        let result = decode_asks(&input);
-
-        let mut expected = BTreeMap::new();
-        expected.insert(
-            BigDecimal::from_str("100").unwrap(),
-            BigDecimal::from_str("1").unwrap(),
-        );
-        expected.insert(
-            BigDecimal::from_str("101").unwrap(),
-            BigDecimal::from_str("0").unwrap(),
-        );
-
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_decode_bids() {
-        let input = vec![
-            ["99.9900".to_string(), "5.500".to_string()],
-            ["98.0000".to_string(), "0.000".to_string()],
-        ];
-        let result = decode_bids(&input);
-
-        let mut expected = BTreeMap::new();
-        expected.insert(
-            Reverse(BigDecimal::from_str("99.99").unwrap()),
-            BigDecimal::from_str("5.5").unwrap(),
-        );
-        expected.insert(
-            Reverse(BigDecimal::from_str("98").unwrap()),
-            BigDecimal::from_str("0").unwrap(),
-        );
-
-        assert_eq!(result, expected);
-    }
+    Ok(updates)
 }
