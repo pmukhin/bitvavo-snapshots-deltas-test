@@ -135,7 +135,7 @@ impl PriceLevel {
 
 impl Display for PriceLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.price_bps.to_string())
+        write!(f, "{}", self.price_bps)
     }
 }
 
@@ -202,6 +202,65 @@ pub async fn pull_snapshots(
 
     info!("done fetching snapshots");
     Ok(snapshots)
+}
+
+pub struct TokenWrapper(CancellationToken);
+
+impl Drop for TokenWrapper {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+pub async fn get_deltas(
+    config: &Config,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<BTreeMap<u64, BookUpdate>> {
+    let _span = tracing::info_span!("get_deltas").entered();
+    let _token_wrapper = TokenWrapper(cancellation_token);
+
+    let url = format!("{}/v2/", config.ws_url)
+        .into_client_request()
+        .expect("invalid URL");
+
+    let (ws_stream, _) = connect_async(url).await.expect("failed to connect");
+
+    info!("connected to Bitvavo WebSocket @ {}", config.ws_url);
+
+    let (mut write, mut read) = ws_stream.split();
+
+    let sub_msg = serde_json::json!({
+        "action": "subscribe",
+        "channels": [{
+            "name": "book",
+            "markets": [config.market],
+        }]
+    });
+
+    write
+        .send(Message::Text(sub_msg.to_string().into()))
+        .await
+        .expect("failed to send subscribe to the events");
+
+    let mut updates: BTreeMap<u64, BookUpdate> = BTreeMap::new();
+
+    info!("starting polling events...");
+
+    while let Some(Ok(msg)) = read.next().await {
+        if let Message::Text(text) = msg {
+            // Try to parse as a book update
+            if let Ok(raw_update) = serde_json::from_str::<BookUpdateDto>(&text) {
+                updates.insert(raw_update.nonce, raw_update.try_into()?);
+            }
+            if updates.len() == config.num_snapshots {
+                break;
+            }
+        }
+    }
+
+    info!("done fetching events");
+
+    Ok(updates)
 }
 
 #[cfg(test)]
@@ -356,63 +415,4 @@ mod tests {
 
         Ok(())
     }
-}
-
-pub struct TokenWrapper(CancellationToken);
-
-impl Drop for TokenWrapper {
-    fn drop(&mut self) {
-        self.0.cancel();
-    }
-}
-
-pub async fn get_deltas(
-    config: &Config,
-    cancellation_token: CancellationToken,
-) -> anyhow::Result<BTreeMap<u64, BookUpdate>> {
-    let _span = tracing::info_span!("get_deltas").entered();
-    let _token_wrapper = TokenWrapper(cancellation_token);
-
-    let url = format!("{}/v2/", config.ws_url)
-        .into_client_request()
-        .expect("invalid URL");
-
-    let (ws_stream, _) = connect_async(url).await.expect("failed to connect");
-
-    info!("connected to Bitvavo WebSocket @ {}", config.ws_url);
-
-    let (mut write, mut read) = ws_stream.split();
-
-    let sub_msg = serde_json::json!({
-        "action": "subscribe",
-        "channels": [{
-            "name": "book",
-            "markets": [config.market],
-        }]
-    });
-
-    write
-        .send(Message::Text(sub_msg.to_string().into()))
-        .await
-        .expect("failed to send subscribe to the events");
-
-    let mut updates: BTreeMap<u64, BookUpdate> = BTreeMap::new();
-
-    info!("starting polling events...");
-
-    while let Some(Ok(msg)) = read.next().await {
-        if let Message::Text(text) = msg {
-            // Try to parse as a book update
-            if let Ok(raw_update) = serde_json::from_str::<BookUpdateDto>(&text) {
-                updates.insert(raw_update.nonce, raw_update.try_into()?);
-            }
-            if updates.len() == config.num_snapshots {
-                break;
-            }
-        }
-    }
-
-    info!("done fetching events");
-
-    Ok(updates)
 }

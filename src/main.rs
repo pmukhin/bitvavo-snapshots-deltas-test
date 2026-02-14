@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let last_nonce_updates = *relevant_updates_keys
         .last()
         .context("can't derive last_nonce_updates")?;
+
     let first_nonce_snapshots = *snapshot_keys
         .next()
         .context("can't derive first_nonce_snapshots")?;
