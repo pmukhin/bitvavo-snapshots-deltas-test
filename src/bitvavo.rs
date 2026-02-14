@@ -79,7 +79,7 @@ impl TryFrom<BookUpdateDto> for BookUpdate {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct OrderBook {
     pub asks: BTreeMap<PriceLevel, BigDecimal>,
     pub bids: BTreeMap<Reverse<PriceLevel>, BigDecimal>,

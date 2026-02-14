@@ -1,13 +1,12 @@
 mod bitvavo;
 mod config;
 
-use crate::bitvavo::{BookUpdate, OrderBook, get_deltas, pull_snapshots};
+use crate::bitvavo::{OrderBook, get_deltas, pull_snapshots};
 use crate::config::Config;
 use anyhow::Context;
 use clap::Parser;
 use prettytable::{Table, row};
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, info, span};
 
@@ -65,14 +64,13 @@ async fn main() -> anyhow::Result<()> {
     assert_eq!(last_nonce_updates, last_nonce_snapshots);
 
     let mut base_snapshot = snapshots
-        .first_key_value()
-        .map(|(_, v)| (*v).clone())
-        .unwrap();
-
+        .pop_first()
+        .context("can't derive base_snapshot: snapshots are empty?")?
+        .1;
     let last_snapshot = snapshots
-        .last_key_value()
-        .map(|(_, v)| v.clone())
-        .context("can't derive last_snapshot")?;
+        .pop_last()
+        .context("can't derive last_snapshot: snapshots are empty?")?
+        .1;
 
     base_snapshot.apply_updates(all_updates);
 
