@@ -32,12 +32,9 @@ async fn main() -> anyhow::Result<()> {
     assert!(all_updates.len() >= 2);
     assert!(snapshots.len() >= 2);
 
-    let snapshot_nonces: Vec<u64> = snapshots.keys().cloned().collect();
-    for snapshot_nonce in snapshot_nonces {
-        if !all_updates.contains_key(&(snapshot_nonce + 1)) {
-            snapshots.remove(&snapshot_nonce);
-        }
-    }
+    snapshots.retain(|nonce, _| {
+        all_updates.contains_key(&(nonce + 1))
+    });
 
     let first_update_nonce = *snapshots
         .keys()
