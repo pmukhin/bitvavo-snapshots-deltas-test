@@ -7,6 +7,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::str::FromStr;
+use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -188,6 +189,8 @@ pub async fn pull_snapshots(
     config: &Config,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<BTreeMap<u64, OrderBook>> {
+    const INTERVAL: Duration = Duration::from_millis(200);
+
     let _span = tracing::info_span!("pull_snapshots_until").entered();
     let mut snapshots = BTreeMap::new();
 
@@ -198,6 +201,7 @@ pub async fn pull_snapshots(
         snapshots
             .entry(raw_snapshot.nonce)
             .or_insert(raw_snapshot.try_into()?);
+        tokio::time::sleep(INTERVAL).await;
     }
 
     info!("done fetching snapshots");
@@ -229,6 +233,7 @@ pub async fn get_deltas(
 
     let (mut write, mut read) = ws_stream.split();
 
+    // we do it once in a run, so it should be fine
     let sub_msg = serde_json::json!({
         "action": "subscribe",
         "channels": [{
