@@ -6,11 +6,10 @@ use serde::Deserialize;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 trait EqZero {
@@ -37,23 +36,25 @@ fn parse_big_decimal(decimal_str: &str) -> BigDecimal {
 
 fn decode_asks(asks: &[[String; 2]]) -> BTreeMap<BigDecimal, BigDecimal> {
     asks.iter()
-        .map(|b| (
-            parse_big_decimal(&b[0]),
-            parse_big_decimal(&b[1]))).collect()
+        .map(|b| (parse_big_decimal(&b[0]), parse_big_decimal(&b[1])))
+        .collect()
 }
 
 fn decode_bids(bids: &[[String; 2]]) -> BTreeMap<Reverse<BigDecimal>, BigDecimal> {
     bids.iter()
-        .map(|b| (
-            Reverse(parse_big_decimal(&b[0])),
-            parse_big_decimal(&b[1]))).collect()
+        .map(|b| (Reverse(parse_big_decimal(&b[0])), parse_big_decimal(&b[1])))
+        .collect()
 }
 
 impl From<OrderBookDto> for OrderBook {
     fn from(dto: OrderBookDto) -> Self {
         let asks = decode_asks(&dto.asks);
         let bids = decode_bids(&dto.bids);
-        OrderBook { asks, bids, nonce: dto.nonce }
+        OrderBook {
+            asks,
+            bids,
+            nonce: dto.nonce,
+        }
     }
 }
 
@@ -67,7 +68,11 @@ impl From<BookUpdateDto> for BookUpdate {
         if let Some(_bids) = dto.bids {
             bids = Some(decode_bids(&_bids));
         }
-        BookUpdate { asks, bids, nonce: dto.nonce }
+        BookUpdate {
+            asks,
+            bids,
+            nonce: dto.nonce,
+        }
     }
 }
 
@@ -97,7 +102,10 @@ impl OrderBook {
     pub fn apply_updates(&mut self, updates: BTreeMap<u64, BookUpdate>) {
         for update in updates.values() {
             if self.nonce >= update.nonce {
-                panic!("update nonce is smaller or equal to the snapshot's update: snapshot.nonce = {}, update.nonce={}", self.nonce, update.nonce)
+                panic!(
+                    "update nonce is smaller or equal to the snapshot's update: snapshot.nonce = {}, update.nonce={}",
+                    self.nonce, update.nonce
+                )
             }
             Self::apply(update.bids.as_ref(), &mut self.bids);
             Self::apply(update.asks.as_ref(), &mut self.asks);
@@ -128,23 +136,28 @@ pub struct BookUpdateDto {
 }
 
 async fn get_snapshot(config: &Config) -> Result<OrderBookDto, Error> {
-    let url = format!("{}/v2/{}/book?depth={}", config.api_url, config.market, config.depth);
+    let url = format!(
+        "{}/v2/{}/book?depth={}",
+        config.api_url, config.market, config.depth
+    );
     let raw_book: OrderBookDto = reqwest::get(url).await?.json().await?;
     Ok(raw_book)
 }
 
-pub async fn pull_snapshots_until(
+pub async fn pull_snapshots(
     config: &Config,
-    should_run: Arc<AtomicBool>,
+    cancellation_token: CancellationToken,
 ) -> BTreeMap<u64, OrderBook> {
     let _span = tracing::info_span!("pull_snapshots_until").entered();
     let mut snapshots = BTreeMap::new();
 
     info!("fetching snapshots...");
 
-    while should_run.fetch_and(true, Ordering::Relaxed) {
+    while !cancellation_token.is_cancelled() {
         let raw_snapshot = get_snapshot(config).await.unwrap();
-        snapshots.entry(raw_snapshot.nonce).or_insert(raw_snapshot.into());
+        snapshots
+            .entry(raw_snapshot.nonce)
+            .or_insert(raw_snapshot.into());
     }
 
     info!("done fetching snapshots");
@@ -153,7 +166,7 @@ pub async fn pull_snapshots_until(
 
 pub async fn get_deltas(
     config: &Config,
-    stop_signal: Arc<AtomicBool>,
+    cancellation_token: CancellationToken,
 ) -> BTreeMap<u64, BookUpdate> {
     let _span = tracing::info_span!("get_deltas").entered();
 
@@ -161,9 +174,7 @@ pub async fn get_deltas(
         .into_client_request()
         .expect("invalid URL");
 
-    let (ws_stream, _) = connect_async(url)
-        .await
-        .expect("failed to connect");
+    let (ws_stream, _) = connect_async(url).await.expect("failed to connect");
 
     info!("connected to Bitvavo WebSocket @ {}", config.ws_url);
 
@@ -177,7 +188,8 @@ pub async fn get_deltas(
         }]
     });
 
-    write.send(Message::Text(sub_msg.to_string().into()))
+    write
+        .send(Message::Text(sub_msg.to_string().into()))
         .await
         .expect("failed to send subscribe to the events");
 
@@ -192,7 +204,7 @@ pub async fn get_deltas(
                 updates.insert(raw_update.nonce, raw_update.into());
             }
             if updates.len() == config.num_snapshots {
-                stop_signal.store(false, Ordering::Relaxed);
+                cancellation_token.cancel();
                 break;
             }
         }
@@ -215,11 +227,20 @@ mod tests {
     fn test_order_book_apply_updates() {
         // given
         let mut initial_asks = BTreeMap::new();
-        initial_asks.insert(BigDecimal::from_str("100.0").unwrap(), BigDecimal::from_str("1.0").unwrap());
-        initial_asks.insert(BigDecimal::from_str("101.0").unwrap(), BigDecimal::from_str("2.0").unwrap());
+        initial_asks.insert(
+            BigDecimal::from_str("100.0").unwrap(),
+            BigDecimal::from_str("1.0").unwrap(),
+        );
+        initial_asks.insert(
+            BigDecimal::from_str("101.0").unwrap(),
+            BigDecimal::from_str("2.0").unwrap(),
+        );
 
         let mut initial_bids = BTreeMap::new();
-        initial_bids.insert(Reverse(BigDecimal::from_str("99.0").unwrap()), BigDecimal::from_str("1.5").unwrap());
+        initial_bids.insert(
+            Reverse(BigDecimal::from_str("99.0").unwrap()),
+            BigDecimal::from_str("1.5").unwrap(),
+        );
 
         let mut order_book = OrderBook {
             asks: initial_asks,
@@ -228,21 +249,42 @@ mod tests {
         };
 
         let mut update_asks = BTreeMap::new();
-        update_asks.insert(BigDecimal::from_str("100.0").unwrap(), BigDecimal::from_str("1.2").unwrap()); // update
-        update_asks.insert(BigDecimal::from_str("101.0").unwrap(), BigDecimal::from_str("0.0").unwrap()); // remove
-        update_asks.insert(BigDecimal::from_str("102.0").unwrap(), BigDecimal::from_str("3.0").unwrap()); // add
+        update_asks.insert(
+            BigDecimal::from_str("100.0").unwrap(),
+            BigDecimal::from_str("1.2").unwrap(),
+        ); // update
+        update_asks.insert(
+            BigDecimal::from_str("101.0").unwrap(),
+            BigDecimal::from_str("0.0").unwrap(),
+        ); // remove
+        update_asks.insert(
+            BigDecimal::from_str("102.0").unwrap(),
+            BigDecimal::from_str("3.0").unwrap(),
+        ); // add
 
         let mut update_bids = BTreeMap::new();
-        update_bids.insert(Reverse(BigDecimal::from_str("98.0").unwrap()), BigDecimal::from_str("0.0").unwrap()); // ignore - not present
-        update_bids.insert(Reverse(BigDecimal::from_str("99.0").unwrap()), BigDecimal::from_str("0.0").unwrap()); // remove
-        update_bids.insert(Reverse(BigDecimal::from_str("97.0").unwrap()), BigDecimal::from_str("2.5").unwrap()); // add
+        update_bids.insert(
+            Reverse(BigDecimal::from_str("98.0").unwrap()),
+            BigDecimal::from_str("0.0").unwrap(),
+        ); // ignore - not present
+        update_bids.insert(
+            Reverse(BigDecimal::from_str("99.0").unwrap()),
+            BigDecimal::from_str("0.0").unwrap(),
+        ); // remove
+        update_bids.insert(
+            Reverse(BigDecimal::from_str("97.0").unwrap()),
+            BigDecimal::from_str("2.5").unwrap(),
+        ); // add
 
         let mut updates = BTreeMap::new();
-        updates.insert(2, BookUpdate {
-            asks: Some(update_asks),
-            bids: Some(update_bids),
-            nonce: 2,
-        });
+        updates.insert(
+            2,
+            BookUpdate {
+                asks: Some(update_asks),
+                bids: Some(update_bids),
+                nonce: 2,
+            },
+        );
 
         // when
         order_book.apply_updates(updates);
@@ -251,13 +293,39 @@ mod tests {
         assert_eq!(order_book.nonce, 2);
 
         assert_eq!(order_book.asks.len(), 2);
-        assert_eq!(order_book.asks.get(&BigDecimal::from_str("100.0").unwrap()).unwrap(), &BigDecimal::from_str("1.2").unwrap());
-        assert_eq!(order_book.asks.get(&BigDecimal::from_str("102.0").unwrap()).unwrap(), &BigDecimal::from_str("3.0").unwrap());
-        assert!(!order_book.asks.contains_key(&BigDecimal::from_str("101.0").unwrap()));
+        assert_eq!(
+            order_book
+                .asks
+                .get(&BigDecimal::from_str("100.0").unwrap())
+                .unwrap(),
+            &BigDecimal::from_str("1.2").unwrap()
+        );
+        assert_eq!(
+            order_book
+                .asks
+                .get(&BigDecimal::from_str("102.0").unwrap())
+                .unwrap(),
+            &BigDecimal::from_str("3.0").unwrap()
+        );
+        assert!(
+            !order_book
+                .asks
+                .contains_key(&BigDecimal::from_str("101.0").unwrap())
+        );
 
         assert_eq!(order_book.bids.len(), 1);
-        assert_eq!(order_book.bids.get(&Reverse(BigDecimal::from_str("97.0").unwrap())).unwrap(), &BigDecimal::from_str("2.5").unwrap());
-        assert!(!order_book.bids.contains_key(&Reverse(BigDecimal::from_str("99.0").unwrap())));
+        assert_eq!(
+            order_book
+                .bids
+                .get(&Reverse(BigDecimal::from_str("97.0").unwrap()))
+                .unwrap(),
+            &BigDecimal::from_str("2.5").unwrap()
+        );
+        assert!(
+            !order_book
+                .bids
+                .contains_key(&Reverse(BigDecimal::from_str("99.0").unwrap()))
+        );
     }
 
     #[test]
@@ -283,8 +351,14 @@ mod tests {
         let result = decode_asks(&input);
 
         let mut expected = BTreeMap::new();
-        expected.insert(BigDecimal::from_str("100").unwrap(), BigDecimal::from_str("1").unwrap());
-        expected.insert(BigDecimal::from_str("101").unwrap(), BigDecimal::from_str("0").unwrap());
+        expected.insert(
+            BigDecimal::from_str("100").unwrap(),
+            BigDecimal::from_str("1").unwrap(),
+        );
+        expected.insert(
+            BigDecimal::from_str("101").unwrap(),
+            BigDecimal::from_str("0").unwrap(),
+        );
 
         assert_eq!(result, expected);
     }
@@ -298,8 +372,14 @@ mod tests {
         let result = decode_bids(&input);
 
         let mut expected = BTreeMap::new();
-        expected.insert(Reverse(BigDecimal::from_str("99.99").unwrap()), BigDecimal::from_str("5.5").unwrap());
-        expected.insert(Reverse(BigDecimal::from_str("98").unwrap()), BigDecimal::from_str("0").unwrap());
+        expected.insert(
+            Reverse(BigDecimal::from_str("99.99").unwrap()),
+            BigDecimal::from_str("5.5").unwrap(),
+        );
+        expected.insert(
+            Reverse(BigDecimal::from_str("98").unwrap()),
+            BigDecimal::from_str("0").unwrap(),
+        );
 
         assert_eq!(result, expected);
     }

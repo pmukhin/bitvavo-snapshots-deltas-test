@@ -1,29 +1,29 @@
-mod config;
 mod bitvavo;
+mod config;
 
-use crate::bitvavo::{get_deltas, pull_snapshots_until, BookUpdate, OrderBook};
+use crate::bitvavo::{BookUpdate, OrderBook, get_deltas, pull_snapshots};
 use crate::config::Config;
+use anyhow::Context;
 use clap::Parser;
-use prettytable::{row, Table};
+use prettytable::{Table, row};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use tracing::{info, span, Level};
+use tokio_util::sync::CancellationToken;
+use tracing::{Level, info, span};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let _span = span!(Level::INFO, "main").entered();
 
     let config = Config::parse();
-    let should_run = Arc::new(AtomicBool::new(true));
+    let cancellation_token = CancellationToken::new();
 
     info!("requesting deltas & snapshots...");
 
     let (all_updates, mut snapshots) = tokio::join!(
-        get_deltas(&config, Arc::clone(&should_run)),
-        pull_snapshots_until(&config, should_run),
+        get_deltas(&config, cancellation_token.clone()),
+        pull_snapshots(&config, cancellation_token),
     );
 
     assert!(all_updates.len() >= 2);
@@ -36,8 +36,14 @@ async fn main() {
         }
     }
 
-    let first_update_nonce = *snapshots.keys().next().unwrap();
-    let last_update_nonce = *snapshots.keys().last().unwrap();
+    let first_update_nonce = *snapshots
+        .keys()
+        .next()
+        .context("can't get first_update_nonce: snapshots are empty?")?;
+    let last_update_nonce = *snapshots
+        .keys()
+        .last()
+        .context("can't get last_update_nonce: snapshots are empty?")?;
 
     let relevant_updates: BTreeMap<u64, BookUpdate> = all_updates
         .range(first_update_nonce + 1..=last_update_nonce)
@@ -47,10 +53,18 @@ async fn main() {
     let mut relevant_updates_keys = relevant_updates.keys();
     let mut snapshot_keys = snapshots.keys();
 
-    let first_nonce_updates = *relevant_updates_keys.next().unwrap();
-    let last_nonce_updates = *relevant_updates_keys.last().unwrap();
-    let first_nonce_snapshots = *snapshot_keys.next().unwrap();
-    let last_nonce_snapshots = *snapshot_keys.last().unwrap();
+    let first_nonce_updates = *relevant_updates_keys
+        .next()
+        .context("can't derive first_nonce_updates: relevant_updates_keys is empty?")?;
+    let last_nonce_updates = *relevant_updates_keys
+        .last()
+        .context("can't derive last_nonce_updates")?;
+    let first_nonce_snapshots = *snapshot_keys
+        .next()
+        .context("can't derive first_nonce_snapshots")?;
+    let last_nonce_snapshots = *snapshot_keys
+        .last()
+        .context("can't derive last_nonce_snapshots")?;
 
     assert_eq!(first_nonce_updates, first_nonce_snapshots + 1);
     assert_eq!(last_nonce_updates, last_nonce_snapshots);
@@ -62,17 +76,17 @@ async fn main() {
 
     let last_snapshot = snapshots
         .last_key_value()
-        .map(|(_, v)| v.clone()).unwrap();
+        .map(|(_, v)| v.clone())
+        .context("can't derive last_snapshot")?;
 
     base_snapshot.apply_updates(relevant_updates);
 
     print_table(&base_snapshot, &last_snapshot);
+
+    Ok(())
 }
 
-fn print_table(
-    first_snapshot: &OrderBook,
-    last_snapshot: &OrderBook,
-) {
+fn print_table(first_snapshot: &OrderBook, last_snapshot: &OrderBook) {
     let mut bids = Table::new();
 
     bids.add_row(row![
@@ -88,8 +102,16 @@ fn print_table(
         bids.add_row(row![
             i,
             price.to_string(),
-            last_snapshot.bids.get(r).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
-            first_snapshot.bids.get(r).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
+            last_snapshot
+                .bids
+                .get(r)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| empty.clone()),
+            first_snapshot
+                .bids
+                .get(r)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| empty.clone()),
         ]);
     }
 
@@ -108,8 +130,16 @@ fn print_table(
         asks.add_row(row![
             i,
             price.to_string(),
-            last_snapshot.asks.get(price).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
-            first_snapshot.asks.get(price).map(|p|p.to_string()).unwrap_or_else(|| empty.clone()),
+            last_snapshot
+                .asks
+                .get(price)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| empty.clone()),
+            first_snapshot
+                .asks
+                .get(price)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| empty.clone()),
         ]);
     }
 
